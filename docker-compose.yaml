@@ -1,0 +1,320 @@
+networks:
+  default:
+    name: spark
+    driver: bridge
+    attachable: true
+
+services:
+  #############################
+  # HADOOP AND HDFS           #
+  #############################
+  hdfs-namenode:
+    image: apache/hadoop:3.3.6
+    container_name: hdfs-namenode
+    hostname: hdfs-namenode
+    user: root
+    environment:
+      - HADOOP_HOME=/opt/hadoop
+      - HADOOP_CONF_DIR=/opt/hadoop/conf
+    command: ["/bin/bash", "-lc", "mkdir -p /hadoop/dfs/name && if [ ! -f /hadoop/dfs/name/current/VERSION ]; then /opt/hadoop/bin/hdfs namenode -format -force; fi && /opt/hadoop/bin/hdfs namenode"]
+    ports:
+      - 8020:8020    # NameNode RPC (fs.defaultFS)
+      - 9870:9870    # NameNode Web UI
+    volumes:
+      - hdfs_namenode:/hadoop/dfs/name
+      - ./hadoop-conf:/opt/hadoop/conf:ro
+    healthcheck:
+      test: ["CMD", "bash", "-c", "/opt/hadoop/bin/hdfs dfsadmin -safemode get 2>/dev/null | grep -q 'Safe mode is OFF' || /opt/hadoop/bin/hdfs dfsadmin -safemode get 2>/dev/null | grep -q 'is not in safe mode'"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  hdfs-datanode-1:
+    image: apache/hadoop:3.3.6
+    container_name: hdfs-datanode-1
+    hostname: hdfs-datanode-1
+    depends_on:
+      - hdfs-namenode
+    user: root
+    environment:
+      - HADOOP_HOME=/opt/hadoop
+      - HADOOP_CONF_DIR=/opt/hadoop/conf
+    command: ["/bin/bash", "-lc", "mkdir -p /hadoop/dfs/data && /opt/hadoop/bin/hdfs datanode"]
+    ports:
+      - 9864:9864    # DataNode Web UI
+    volumes:
+      - hdfs_datanode_1:/hadoop/dfs/data
+      - ./hadoop-conf:/opt/hadoop/conf:ro
+
+  # === HDFS Initialization ===
+  # Creates required directories and sets permissions
+  hdfs-init:
+    image: apache/hadoop:3.3.6
+    container_name: hdfs-init
+    user: root
+    depends_on:
+      hdfs-namenode:
+        condition: service_healthy
+      hdfs-datanode-1:
+        condition: service_started
+    environment:
+      - HADOOP_HOME=/opt/hadoop
+      - HADOOP_CONF_DIR=/opt/hadoop/conf
+    volumes:
+      - ./hadoop-conf:/opt/hadoop/conf:ro
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        echo "Initializing HDFS directories..."
+        /opt/hadoop/bin/hdfs dfs -mkdir -p /user/hive/warehouse
+        /opt/hadoop/bin/hdfs dfs -mkdir -p /tmp
+        /opt/hadoop/bin/hdfs dfs -chmod -R 1777 /tmp
+        /opt/hadoop/bin/hdfs dfs -chmod -R 775 /user/hive/warehouse
+        /opt/hadoop/bin/hdfs dfs -mkdir -p /spark-logs
+        /opt/hadoop/bin/hdfs dfs -chmod 777 /spark-logs
+        echo "HDFS initialization complete!"
+        /opt/hadoop/bin/hdfs dfs -ls /
+        /opt/hadoop/bin/hdfs dfs -ls /user/hive/
+    restart: "no"
+
+  #############################
+  # SPARK CLUSTER             #
+  #############################
+  # === Spark Master Node ===
+  spark-master:
+    image: apache/spark:3.5.1-scala2.12-java11-python3-r-ubuntu
+    container_name: spark-master
+    environment:
+      - SPARK_NO_DAEMONIZE=true
+      - HADOOP_CONF_DIR=/opt/hadoop/conf
+      - SPARK_MASTER_HOST=spark-master
+    ports:
+      - 7077:7077
+      - 8080:8080
+    volumes:
+      - spark_data:/tmp
+      - ./hadoop-conf:/opt/hadoop/conf:ro
+    command: ["/opt/spark/sbin/start-master.sh"]
+    depends_on:
+      - hdfs-namenode
+      - hdfs-datanode-1
+
+  # === Spark Worker Node(s) ===
+  spark-worker-1:
+    image: apache/spark:3.5.1-scala2.12-java11-python3-r-ubuntu
+    container_name: spark-worker-1
+    environment:
+      - SPARK_NO_DAEMONIZE=true
+      - SPARK_WORKER_CORES=2
+      - SPARK_WORKER_MEMORY=2G
+      - HADOOP_CONF_DIR=/opt/hadoop/conf
+    depends_on:
+      - spark-master
+    ports:
+      - 8081:8081
+    volumes:
+      - spark_data:/tmp
+      - ./hadoop-conf:/opt/hadoop/conf:ro
+    command: ["/opt/spark/sbin/start-worker.sh", "spark://spark-master:7077"]
+
+  # === Container to submit Spark jobs ===
+  spark-submit:
+    image: apache/spark:3.5.1-scala2.12-java11-python3-r-ubuntu
+    container_name: spark-submit
+    working_dir: /app
+    environment:
+      - PYSPARK_PYTHON=python3
+      - PYSPARK_DRIVER_PYTHON=python3
+      - HADOOP_CONF_DIR=/opt/hadoop/conf
+      - SPARK_CONF_DIR=/opt/spark/conf
+      - PYTHONPATH=/opt/spark/python:/opt/spark/python/lib/py4j-0.10.9.7-src.zip:/app
+    depends_on:
+      spark-master:
+        condition: service_started
+      spark-worker-1:
+        condition: service_started
+      hdfs-namenode:
+        condition: service_healthy  # Wait for HDFS to be ready (safemode is off)
+      hdfs-datanode-1:
+        condition: service_started
+      hdfs-init:
+        condition: service_completed_successfully  # Wait for HDFS directories to be created
+    volumes:
+      - ./app:/app
+      - spark_data:/tmp
+      - ./hadoop-conf:/opt/hadoop/conf:ro
+      - ./spark-conf:/opt/spark/conf:ro
+    ports:
+      - 4040-4050:4040-4050
+    command: ["bash", "-lc", "sleep infinity"]
+
+  # === Spark History Server ===
+  # This is used to view the history of Spark jobs
+  spark-history:
+    image: apache/spark:3.5.1-scala2.12-java11-python3-r-ubuntu
+    container_name: spark-history
+    environment:
+      - SPARK_NO_DAEMONIZE=true
+      - HADOOP_CONF_DIR=/opt/hadoop/conf
+      - SPARK_CONF_DIR=/opt/spark/conf
+    depends_on:
+      hdfs-namenode:
+        condition: service_healthy  # Wait for HDFS to be ready (safemode is off)
+      hdfs-datanode-1:
+        condition: service_started
+      hdfs-init:
+        condition: service_completed_successfully  # Wait for HDFS directories to be created
+    ports:
+      - 18080:18080
+    volumes:
+      - ./hadoop-conf:/opt/hadoop/conf:ro
+      - ./spark-conf:/opt/spark/conf:ro
+    command: ["/opt/spark/sbin/start-history-server.sh"]
+
+
+  ##################
+  # POSTGRES DB    #
+  ##################
+  # psql -h localhost -U postgres
+  postgres:
+    image: postgres:15
+    container_name: postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    # Run with logical replication enabled for Debezium.
+    command:
+      - "postgres"
+      - "-c"
+      - "wal_level=logical"
+    volumes:
+      # The official postgres docker image will run .sql scripts 
+      # found in the /docker-entrypoint-initdb.d/ folder.
+      - ./postgres/initdb:/docker-entrypoint-initdb.d/
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+  
+
+  ##################
+  # KAFKA CLUSTER  #
+  ##################
+  # Zookeeper is required by Kafka. It is used to keep metadata,
+  # and also used to promote a new leader when the current leader fails.
+  zookeeper:
+    image: quay.io/debezium/zookeeper:2.4
+    container_name: zookeeper
+    ports:
+      - 2181:2181
+      - 2888:2888
+      - 3888:3888
+    volumes:
+      - zookeeper_data:/zookeeper/data
+      - zookeeper_log:/zookeeper/log
+
+  # === Kafka Broker, single node ===
+  kafka:
+    image: quay.io/debezium/kafka:2.4
+    container_name: kafka
+    hostname: kafka
+    depends_on:
+      - zookeeper
+    environment:
+      - ZOOKEEPER_CONNECT=zookeeper:2181
+      - BROKER_ID=1
+      - KAFKA_LISTENERS=PLAINTEXT://0.0.0.0:9092
+      - KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9092
+    ports:
+      - 9092:9092
+    volumes:
+      - kafka_data:/kafka/data
+      - kafka_logs:/kafka/logs
+    healthcheck:
+      test: ["CMD", "/kafka/bin/kafka-broker-api-versions.sh", "--bootstrap-server", "kafka:9092"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 40s
+
+  # === Kafka UI to view the Kafka topics ===
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      DYNAMIC_CONFIG_ENABLED: 'true'
+    ports:
+      - 8090:8080
+  
+  ##################
+  # Debezium       #
+  ##################
+  # See the documentation of REST API.
+  # https://docs.confluent.io/platform/current/connect/references/restapi.html
+  kafka-connect:
+    image: quay.io/debezium/connect:2.7
+    container_name: kafka-connect
+    ports:
+     - 8083:8083
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment:
+     - BOOTSTRAP_SERVERS=kafka:9092
+     - GROUP_ID=1
+     - CONFIG_STORAGE_TOPIC=my_connect_configs
+     - OFFSET_STORAGE_TOPIC=my_connect_offsets
+     - STATUS_STORAGE_TOPIC=my_connect_statuses
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8083/connectors"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+  # === Auto-register Debezium Connector ===
+  debezium-init:
+    image: curlimages/curl:latest
+    container_name: debezium-init
+    depends_on:
+      kafka-connect:
+        condition: service_healthy
+    volumes:
+      - ./debezium:/config
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        echo "Waiting for Kafka Connect to be ready..."
+        sleep 5
+        echo "Registering Debezium Postgres connector..."
+        curl -X POST -H "Accept:application/json" -H "Content-Type:application/json" \
+          http://kafka-connect:8083/connectors/ \
+          -d @/config/register-postgres-kafka.json
+        echo ""
+        echo "Connector registration complete!"
+        echo "Checking registered connectors:"
+        curl -s http://kafka-connect:8083/connectors/ | grep -o '\[.*\]'
+    restart: "no"
+
+
+volumes:
+  spark_data:
+  hdfs_namenode:
+  hdfs_datanode_1:
+  zookeeper_data:
+  zookeeper_log:
+  kafka_data:
+  kafka_logs:
+
