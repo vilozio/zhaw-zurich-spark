@@ -73,6 +73,8 @@ services:
         /opt/hadoop/bin/hdfs dfs -chmod -R 775 /user/hive/warehouse
         /opt/hadoop/bin/hdfs dfs -mkdir -p /spark-logs
         /opt/hadoop/bin/hdfs dfs -chmod 777 /spark-logs
+        /opt/hadoop/bin/hdfs dfs -mkdir -p /spark-checkpoints
+        /opt/hadoop/bin/hdfs dfs -chmod 777 /spark-checkpoints
         echo "HDFS initialization complete!"
         /opt/hadoop/bin/hdfs dfs -ls /
         /opt/hadoop/bin/hdfs dfs -ls /user/hive/
@@ -122,6 +124,7 @@ services:
   spark-submit:
     image: apache/spark:3.5.1-scala2.12-java11-python3-r-ubuntu
     container_name: spark-submit
+    user: root
     working_dir: /app
     environment:
       - PYSPARK_PYTHON=python3
@@ -147,7 +150,7 @@ services:
       - ./spark-conf:/opt/spark/conf:ro
     ports:
       - 4040-4050:4040-4050
-    command: ["bash", "-lc", "sleep infinity"]
+    command: ["bash", "-lc", "mkdir -p /home/spark/.ivy2/cache && chown -R spark:spark /home/spark/.ivy2 && sleep infinity"]
 
   # === Spark History Server ===
   # This is used to view the history of Spark jobs
