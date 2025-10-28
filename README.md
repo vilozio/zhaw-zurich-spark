@@ -123,3 +123,53 @@ docker exec -it spark-submit bash -lc \
 ```bash
 docker exec -it spark-submit bash /app/run_streaming.sh streaming_retain_customers.py
 ```
+
+
+# Task 1: Start the Environment
+
+1. Start all services:
+```bash
+docker compose up -d
+```
+
+2. Wait ~30 seconds for all services to start, then check the following UIs:
+   - HDFS NameNode: http://localhost:9870
+   - Spark Master: http://localhost:8080
+   - Spark History Server: http://localhost:18080
+   - Kafka UI: http://localhost:8090
+
+3. Check what containers are running:
+```bash
+docker ps
+```
+
+4. **Questions to explore**:
+   - How many Spark workers do you see in the Spark Master UI?
+   - In the Kafka UI, what topics exist? (Hint: Look under the "Topics" tab)
+   - What is Debezium doing in this architecture?
+
+5. Login to PostgreSQL and check the tables:
+```bash
+docker compose exec postgres psql -U postgres
+```
+Then run:
+```sql
+-- list all tables
+\dt
+
+-- run select queries
+SELECT * FROM customers;
+SELECT * FROM orders;
+
+-- exit 
+exit;
+```
+
+# Task 2: Add Orders Processing to streaming pipeline
+
+Complete the `streaming_write_to_delta.py` file by filling in **3 TODOs**.
+
+1. Define the Debezium schema for orders messages
+2. Parse orders from Kafka and write them to Delta Lake
+3. Subscribe to both customers AND orders topics
+
