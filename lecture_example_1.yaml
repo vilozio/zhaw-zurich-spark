@@ -1,0 +1,57 @@
+networks:
+  default:
+    name: spark
+    driver: bridge
+    attachable: true
+
+services:
+  ##################
+  # POSTGRES DB    #
+  ##################
+  # psql -h localhost -U postgres
+  postgres:
+    image: postgres:15
+    container_name: postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    # Run with logical replication enabled for Debezium.
+    command:
+      - "postgres"
+      - "-c"
+      - "wal_level=logical"
+    volumes:
+      # The official postgres docker image will run .sql scripts 
+      # found in the /docker-entrypoint-initdb.d/ folder.
+      - ./postgres/initdb:/docker-entrypoint-initdb.d/
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+  
+  
+  ##################
+  # Test Data      #
+  ##################
+
+  test-data:
+    image: python:3.11-alpine
+    container_name: test-data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./app:/app
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        echo "Waiting for Postgres to be ready..."
+        sleep 3
+        pip install psycopg2-binary
+        echo "Inserting test data..."
+        echo "y" | python /app/insert_test_data.py
+        echo "Test data insertion complete!"
