@@ -9,7 +9,7 @@ echo "Starting PySpark streaming job $SCRIPT..."
 echo "=================================================="
 
 /opt/spark/bin/spark-submit \
-  --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1,io.delta:delta-spark_2.12:3.2.1 \
+  --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1,io.delta:delta-spark_2.12:3.1.0 \
   --conf spark.sql.streaming.checkpointLocation=/spark-checkpoints \
   /app/$SCRIPT
 

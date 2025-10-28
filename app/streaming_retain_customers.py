@@ -24,6 +24,7 @@ DATA_WINDOW_HOURS = 24  # Look at customers from last 24 hours
 CUSTOMERS_TABLE_PATH = "/user/hive/warehouse/customers_retention"
 ORDERS_TABLE_PATH = "/user/hive/warehouse/orders_retention"
 RISK_ANALYSIS_TABLE_PATH = "/user/hive/warehouse/customer_risk_analysis"
+
 CHECKPOINT_PATH = "/spark-checkpoints/retention_stream"
 
 # ========================================
@@ -155,6 +156,43 @@ SELECT
 FROM evaluate_churn_risk
 """
 
+
+RETENTION_SQL_SIMPLE = """
+WITH first_time_customers AS (
+    SELECT 
+        c.customer_id,
+        c.name,
+        c.created_at as registration_time,
+        c.membership_level
+    FROM recent_customers c
+),
+customer_orders AS (
+    SELECT
+        o.customer_id,
+        o.order_id,
+        o.product,
+        o.cost,
+        o.created_at as order_time,
+        CASE 
+            WHEN o.description LIKE '%cancelled%' OR o.description LIKE '%canceled%' THEN 1 
+            ELSE 0 
+        END as is_cancelled
+    FROM recent_orders o
+    INNER JOIN first_time_customers ftc ON o.customer_id = ftc.customer_id
+),
+order_aggregates AS (
+    SELECT
+        co.customer_id,
+        COUNT(co.order_id) as total_orders
+    FROM customer_orders co
+    GROUP BY co.customer_id
+)
+SELECT 
+    oa.customer_id,
+    oa.total_orders
+FROM order_aggregates oa
+"""
+
 # ========================================
 # BATCH PROCESSING FUNCTION
 # ========================================
@@ -193,8 +231,6 @@ def process_unified_batch(batch_df, batch_id):
     customers_parsed = (
         customers_raw
         .withColumn("parsed_data", F.from_json(F.col("value").cast("string"), customers_schema))
-        .filter(F.col("parsed_data").isNotNull())
-        .filter(F.col("parsed_data.payload.op").isin("c", "r"))  # Create or Read operations
         .select(
             F.col("parsed_data.payload.customer_id").alias("customer_id"),
             F.col("parsed_data.payload.name").alias("name"),
@@ -212,7 +248,6 @@ def process_unified_batch(batch_df, batch_id):
         .write
         .format("delta")
         .mode("append")
-        .partitionBy("created_at_date", "created_at_hour")
         .option("mergeSchema", "true")
         .save(CUSTOMERS_TABLE_PATH)
     )
@@ -225,8 +260,6 @@ def process_unified_batch(batch_df, batch_id):
     orders_parsed = (
         orders_raw
         .withColumn("parsed_data", F.from_json(F.col("value").cast("string"), orders_schema))
-        .filter(F.col("parsed_data").isNotNull())
-        .filter(F.col("parsed_data.payload.op").isin("c", "r"))  # Create or Read operations
         .select(
             F.col("parsed_data.payload.order_id").alias("order_id"),
             F.col("parsed_data.payload.customer_id").alias("customer_id"),
@@ -274,21 +307,17 @@ def process_unified_batch(batch_df, batch_id):
     recent_orders.createOrReplaceTempView("recent_orders")
     
     # Run aggregation SQL
-    risk_analysis = spark.sql(RETENTION_SQL)
+    risk_analysis = spark.sql(RETENTION_SQL_SIMPLE)
     risk_analysis = risk_analysis.withColumn("analysis_timestamp", F.current_timestamp())
     risk_analysis = risk_analysis.withColumn("processed_batch_id", F.lit(batch_id))
     
     # Show sample results
     print("\n📋 Sample Risk Analysis Results:")
     risk_analysis.select(
-        "customer_id", "name", "total_orders", "unique_products", 
-        "cancellation_rate", "at_risk_customer", "trigger_retention_campaign"
+        "customer_id", "total_orders"
     ).show(10, truncate=False)
     
-    # Count at-risk customers
-    at_risk_count = risk_analysis.filter(F.col("at_risk_customer") == 1).count()
-    trigger_count = risk_analysis.filter(F.col("trigger_retention_campaign") == True).count()
-    print(f"🚨 Found {at_risk_count} at-risk customers ({trigger_count} will receive retention campaign)")
+    print(f"✅ Risk analysis complete for {risk_analysis.count()} customers")
     
     # Write results to Delta
     (
@@ -296,7 +325,6 @@ def process_unified_batch(batch_df, batch_id):
         .write
         .format("delta")
         .mode("append")
-        .partitionBy("at_risk_customer")
         .option("mergeSchema", "true")
         .save(RISK_ANALYSIS_TABLE_PATH)
     )

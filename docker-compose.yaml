@@ -316,27 +316,27 @@ services:
   ##################
   # Uncomment the following to generate test data...
 
-  # test-data:
-  #   image: python:3.11-alpine
-  #   container_name: test-data
-  #   depends_on:
-  #     postgres:
-  #       condition: service_healthy
-  #     kafka-connect:
-  #       condition: service_healthy
-  #     debezium-init:
-  #       condition: service_completed_successfully
-  #   volumes:
-  #     - ./app:/app
-  #   entrypoint: ["/bin/sh", "-c"]
-  #   command:
-  #     - |
-  #       echo "Waiting for Postgres to be ready..."
-  #       sleep 5
-  #       pip install psycopg2-binary
-  #       echo "Inserting test data..."
-  #       echo "y" | python /app/insert_test_data.py
-  #       echo "Test data insertion complete!"
+  test-data:
+    image: python:3.11-alpine
+    container_name: test-data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka-connect:
+        condition: service_healthy
+      debezium-init:
+        condition: service_completed_successfully
+    volumes:
+      - ./app:/app
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        echo "Waiting for Postgres to be ready..."
+        sleep 5
+        pip install psycopg2-binary
+        echo "Inserting test data..."
+        echo "y" | python /app/insert_test_data.py
+        echo "Test data insertion complete!"
 
 
 volumes:
